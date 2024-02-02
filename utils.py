@@ -1,17 +1,15 @@
 import torch
-import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-import os
-import csv
-import torchvision.transforms
-from PIL import Image
-from IPython.core.display import display, HTML
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+from torchvision.transforms import (
+    Resize, Compose, ToTensor, Normalize, CenterCrop, RandomResizedCrop,
+    RandomHorizontalFlip, ColorJitter
+)
 import warnings
 warnings.filterwarnings("ignore")
 
-def compute_hyperplans_and_grid(feats, args, crops=False):
+def compute_hyperplans_and_grid(feats):
     """
         Given features, compute the hyperplans between each class and returns the a grid of predictions.
         - In:
@@ -22,31 +20,27 @@ def compute_hyperplans_and_grid(feats, args, crops=False):
             * plot_grid : A dictionnary with necessary
     """
     assert feats.shape[-1]==2, 'Error, features should be of dimension 2'
-    feats = feats[:, :args.nb_shots]
-    if crops: feats = torch.mean(feats, dim=2)
-
     grid_size=100
-    x_min, x_max = feats.reshape(-1, args.nb_ways-1).min(dim=0)[0][0].item(), feats.reshape(-1, args.nb_ways-1).max(dim=0)[0][0].item()
-    y_min, y_max = feats.reshape(-1, args.nb_ways-1).min(dim=0)[0][1].item(), feats.reshape(-1, args.nb_ways-1).max(dim=0)[0][1].item()
+    x_min, x_max = feats.min(dim=0)[0][0].item(), feats.max(dim=0)[0][0].item()
+    y_min, y_max = feats.min(dim=0)[0][1].item(), feats.max(dim=0)[0][1].item()
 
     xmingrid = x_min-abs(x_min)*0.4
     ymingrid = y_min-abs(y_min)*0.4
     xmaxgrid = x_max+abs(x_max)*0.4
     ymaxgrid = y_max+abs(y_max)*0.4
 
-    means = torch.mean(feats, dim=1)
     x = torch.linspace(xmingrid, xmaxgrid, grid_size)  # extent of the grid on the x axis
     y = torch.linspace(ymingrid, ymaxgrid, grid_size)  # extent of the grid on the y axis
     [xx, yy] = torch.meshgrid(x, y)
     grid_points = torch.stack([xx.ravel(), yy.ravel()], axis=1).to(feats.device)
-    distances = torch.norm((grid_points.reshape(-1,1,2)-means.reshape(1,-1,2)), dim=2, p=2)
+    distances = torch.norm((grid_points.reshape(-1,1,2)-feats.reshape(1,-1,2)), dim=2, p=2)
     Z = torch.min(distances, dim = 1)[1]
     Z = Z.reshape(grid_size, grid_size)
 
     hyperplans = []
-    for n in range(-1, args.nb_ways-1):
-        x1 = means[n].cpu() # centroid class 2
-        x2 = means[n+1].cpu() # centroid class 2
+    for n in range(-1, 2):
+        x1 = feats[n].cpu() # centroid class 2
+        x2 = feats[n+1].cpu() # centroid class 2
         middle = (x1+x2)/2
         a = (x1[1]-x2[1])/(x1[0]-x2[0])
         b = middle[1] + middle[0]/a
@@ -76,64 +70,25 @@ def compute_hyperplans_and_grid(feats, args, crops=False):
                 'intersection':intersection}
 
     return plot_grid
-
-def opencsv(filename):
-    """
-    Open csv file
-    """
-    file = open(filename)
-    csvreader = csv.reader(file)
-    header = []
-    header = next(csvreader)
-    rowstrain = []
-    rows = []
-    for row in csvreader:
-        rows.append(row)
-    return rows
-
-def getimg(classe, sample=None, filepath='', directory=''):
-    """
-    Get an image given its classe and sample
-    """
-    src = opencsv(filepath)
-    if type(classe) == torch.Tensor : classe = classe.item()
-    if type(classe)==int:
-        if sample==None:
-            idx=int(np.random.randint(600))
-        else:
-            if type(sample) == torch.Tensor : sample = sample.item()
-            idx = sample
-        print("idx: ", idx)
-        print("classe: ", classe)
-        filename=src[idx+20*classe][0]
-        im = Image.open(os.path.join(directory,filename))
-        im = torchvision.transforms.Resize((256,256))(im)
-        im = torchvision.transforms.CenterCrop((224,224))(im)
-        return im
-
-def return_annotation_boxes(classe, sample, n_augmentation, xybox, args, crops=False, features_path='', filepath='./test.csv', directory='./images'):
+def return_annotation_boxes(image, xybox):
     """
     Returns annotation boxes given a classe and a sample
     """
-    img_array = np.array(getimg(classe, sample, filepath=filepath, directory=directory))
-    im = OffsetImage(img_array, zoom=1)
+    im = Resize(size=(256, 256))(image)
+    im = CenterCrop(size=(224, 224))(im)
+    im = OffsetImage(np.array(im), zoom=1)
     annotBox = AnnotationBbox(im, (0,0), xybox=xybox, xycoords='data',boxcoords="offset points",  pad=0.3,  arrowprops=dict(arrowstyle="->"))
     return [annotBox]
 
-def hover_few_shot_space(reduced_features, run_classes, run_indices, args, figsize=(25, 15), query_start=0, query_end=2, plot_support=True, crops=False, images_path='./images/'):
+def hover_few_shot_space(reduced_text_features, reduced_image_features, images_reshaped, classes, figsize=(15, 15)):
 
     fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot(111)
     colors = ['red', 'deepskyblue', 'orange', 'green']
     xybox=(25., 25.)
 
-    assert query_start<args.nb_queries, f'query_start should be smaller than {args.nb_queries}'
-    assert query_start>=0, f'query_start should be larger than 0'
-    assert query_end<=args.nb_queries, f'query_end should be smaller than {args.nb_queries}'
-    assert query_end>0, f'query_end should be larger than 0'
-
     # Plot Grid
-    plot_grid = compute_hyperplans_and_grid(reduced_features, args, crops=crops)
+    plot_grid = compute_hyperplans_and_grid(reduced_text_features)
     xx, yy, Z = plot_grid['xx'], plot_grid['yy'], plot_grid['Z']
     plt.contourf(xx.cpu(), yy.cpu(), Z.cpu(), alpha=0.1)
 
@@ -162,38 +117,29 @@ def hover_few_shot_space(reduced_features, run_classes, run_indices, args, figsi
 
     X, Y, colors_list, edgecolor_list, list_image_hover = [], [], [], [], []
 
-    if len(reduced_features.shape) == 3: reduced_features = reduced_features.unsqueeze(2)
-
     # Support
-    for c in range(reduced_features.shape[0]):
-        support = reduced_features[c, :args.nb_shots]
-        if plot_support:
-            for s in range(args.nb_shots):
-                X.append(support[s, :, 0].cpu())
-                Y.append(support[s, :, 1].cpu())
-                colors_list = colors_list+ [colors[c]]*len(support[s])
-                edgecolor_list = edgecolor_list+ ['black']*len(support[s])
-                c_ind, s_ind = run_classes[c], run_indices[c][s]
-
-                list_image_hover = list_image_hover + return_annotation_boxes(c_ind, s_ind, 50, xybox, args, features_path=images_path, crops=crops)
-
-        query = reduced_features[c, args.nb_shots:]
-        print("query: ", query.shape)
+    for c in range(reduced_text_features.shape[0]):
+        support = reduced_text_features[c]
+        X.append(support[0].cpu())
+        Y.append(support[1].cpu())
+        colors_list = colors_list+ [colors[c]]
+        edgecolor_list = edgecolor_list+ ['black']
+        # Text for support 
+        if classes is not None and len(classes)!=0:
+            plt.text(support[0].cpu()+0.01, support[1].cpu(), classes[c], fontsize=12)
+        
+        query = reduced_image_features[c]
         for q in range(query.shape[0]):
-            X.append(query[q, :, 0].cpu())
-            Y.append(query[q, :, 1].cpu())
-            colors_list = colors_list+ [colors[c]]*len(query[q])
-            edgecolor_list = edgecolor_list+ [colors[c]]*len(query[q])
-            c_ind, q_ind = run_classes[c], run_indices[c][q+args.nb_shots]
-
-            list_image_hover = list_image_hover + return_annotation_boxes(c_ind, q_ind, 50, xybox, args, features_path=images_path, crops=crops)
-
-    X = torch.cat(X)
-    Y = torch.cat(Y)
+            X.append(query[q, 0].cpu())
+            Y.append(query[q, 1].cpu())
+            colors_list = colors_list+ [colors[c]]
+            edgecolor_list = edgecolor_list+ [colors[c]]
+            list_image_hover = list_image_hover + return_annotation_boxes(images_reshaped[c][q], xybox)
+    X = torch.stack(X)
+    Y = torch.stack(Y)
 
     line = plt.scatter(X, Y, color=colors_list, edgecolor=edgecolor_list)
     plt.contourf(xx.cpu(), yy.cpu(), Z.cpu(), alpha=0.1, color=colors) #cmap=plt.cm.RdBu
-
     for annotBox in list_image_hover:
         ax.add_artist(annotBox)
         annotBox.set_visible(False)
@@ -224,5 +170,4 @@ def hover_few_shot_space(reduced_features, run_classes, run_indices, args, figsi
 
     plt.xlim(xmingrid, xmaxgrid)
     plt.ylim(ymingrid, ymaxgrid)
-
     plt.show()
